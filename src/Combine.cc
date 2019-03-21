@@ -705,6 +705,7 @@ void Combine::run(TString hlfFile, const std::string &dataset, double &limit, do
   addDiscreteNuisances(w);
   // and give him the regular nuisances too
   addNuisances(nuisances);
+  addFloatingParameters(w->allVars());
   addPOI(POI);
 
   tree_ = tree;
@@ -754,9 +755,15 @@ void Combine::run(TString hlfFile, const std::string &dataset, double &limit, do
   }
 
   // Print list of channel masks
-  if (verbose >= 2) {
-    RooSimultaneousOpt *simopt = dynamic_cast<RooSimultaneousOpt*>(mc->GetPdf());
-    if (simopt && simopt->channelMasks().getSize() > 0) {
+  RooSimultaneousOpt *simopt = dynamic_cast<RooSimultaneousOpt*>(mc->GetPdf());
+  if (simopt && simopt->channelMasks().getSize() > 0) {
+    int nChnMasks = simopt->channelMasks().getSize();
+    int nActiveMasks = 0;
+    for (int iMask=0; iMask < nChnMasks; iMask++){
+      if (dynamic_cast<RooRealVar*>(simopt->channelMasks().at(iMask))->getVal() > 0) nActiveMasks++;
+    }
+    std::cout << ">>> "<<nActiveMasks<<" out of "<<nChnMasks<<" channels masked\n"<<std::endl;
+    if (verbose >= 2) {
       std::cout << ">>> Channel masks:\n";
       simopt->channelMasks().Print("v");
     }
@@ -1091,19 +1098,35 @@ void Combine::addNuisances(const RooArgSet *nuisances){
     }
 
 }
+void Combine::addFloatingParameters(const RooArgSet &parameters){
+    CascadeMinimizerGlobalConfigs::O().allFloatingParameters = RooArgList();
+    //if (parameters != 0) {
+        TIterator *np = parameters.createIterator();
+        while (RooAbsArg *arg = (RooAbsArg*)np->Next()) {
+	 if (! arg->isConstant()) (CascadeMinimizerGlobalConfigs::O().allFloatingParameters).add(*arg);
+        }
+    //}
+
+}
 void Combine::addDiscreteNuisances(RooWorkspace *w){
 
     RooArgSet *discreteParameters = (RooArgSet*) w->genobj("discreteParams");
  
     CascadeMinimizerGlobalConfigs::O().pdfCategories = RooArgList();
+    CascadeMinimizerGlobalConfigs::O().allRooMultiPdfParams = RooArgList();
 
     if (discreteParameters != 0) {
         TIterator *dp = discreteParameters->createIterator();
         while (RooAbsArg *arg = (RooAbsArg*)dp->Next()) {
           RooCategory *cat = dynamic_cast<RooCategory*>(arg);
           if (cat && (!cat->isConstant() || runtimedef::get("ADD_DISCRETE_FALLBACK"))) {
-            std::cout << "Adding discrete " << cat->GetName() << "\n";
+	    if (verbose){
+              std::cout << "Adding discrete " << cat->GetName() << "\n";
+      	      if (verbose) Logger::instance().log(std::string(Form("Combine.cc: %d -- Adding discrete %s ",__LINE__,cat->GetName())),Logger::kLogLevelInfo,__func__);
+	    }
             (CascadeMinimizerGlobalConfigs::O().pdfCategories).add(*arg);
+
+	    
           }
         }
     } 
@@ -1115,10 +1138,26 @@ void Combine::addDiscreteNuisances(RooWorkspace *w){
          RooCategory *cat = dynamic_cast<RooCategory*>(arg);
          if (! (std::string(cat->GetName()).find("pdfindex") != std::string::npos )) continue;
          if (cat/* && !cat->isConstant()*/) {
-            std::cout << "Adding discrete " << cat->GetName() << "\n";
+	    if (verbose){
+              std::cout << "Adding discrete " << cat->GetName() << "\n";
+      	      if (verbose) Logger::instance().log(std::string(Form("Combine.cc: %d -- Adding discrete %s ",__LINE__,cat->GetName())),Logger::kLogLevelInfo,__func__);
+	    }
             (CascadeMinimizerGlobalConfigs::O().pdfCategories).add(*arg);
          }
 	}
     }
-    
+    // Now lets go through the list of parameters which are associated to this discrete nuisance
+    RooArgSet clients;
+    utils::getClients(CascadeMinimizerGlobalConfigs::O().pdfCategories,(w->allPdfs()),clients);
+    TIterator *it = clients.createIterator();
+    while (RooAbsArg *arg = (RooAbsArg*)it->Next()) { 
+      RooAbsPdf *pdf = dynamic_cast<RooAbsPdf*>(arg);
+      RooArgSet *pdfPars = pdf->getParameters((const RooArgSet*)0);
+      std::auto_ptr<TIterator> iter_v(pdfPars->createIterator());
+      for (RooAbsArg *a = (RooAbsArg *) iter_v->Next(); a != 0; a = (RooAbsArg *) iter_v->Next()) {
+	RooRealVar *v = dynamic_cast<RooRealVar *>(a);
+	if (!v) continue;
+	if (! (v->isConstant())) (CascadeMinimizerGlobalConfigs::O().allRooMultiPdfParams).add(*v) ;
+      }
+    }
 }

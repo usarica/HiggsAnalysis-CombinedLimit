@@ -104,7 +104,7 @@ LimitAlgo("HybridNew specific options") {
         ("rule",    boost::program_options::value<std::string>(&rule_)->default_value(rule_),            "Rule to use: CLs, CLsplusb")
         ("testStat",boost::program_options::value<std::string>(&testStat_)->default_value(testStat_),    "Test statistics: LEP, TEV, LHC (previously known as Atlas), Profile.")
         ("singlePoint",  boost::program_options::value<std::string>(&rValue_)->default_value(rValue_),  "Just compute CLs for the given value of the parameter of interest. In case of multiple parameters, use a syntax 'name=value,name2=value2,...'")
-        ("onlyTestStat", "Just compute test statistics, not actual p-values (works only with --singlePoint)")
+        ("onlyTestStat", "Just compute test statistic for the data (or toy if using -t N), i.e don't throw toys to calculate actual p-values (works only with --singlePoint)")
         ("generateNuisances",            boost::program_options::value<bool>(&genNuisances_)->default_value(genNuisances_), "Generate nuisance parameters for each toy")
         ("generateExternalMeasurements", boost::program_options::value<bool>(&genGlobalObs_)->default_value(genGlobalObs_), "Generate external measurements for each toy, taken from the GlobalObservables of the ModelConfig")
         ("fitNuisances", boost::program_options::value<bool>(&fitNuisances_)->default_value(fitNuisances_), "Fit the nuisances first, before generating the toy data. Set this option to false to acheive the same results as with --bypassFrequentistFit. When not generating toys, eg as in when running with --readHybridresult, this has no effect")
@@ -256,9 +256,9 @@ void HybridNew::validateOptions() {
     if (testStat_ == "LHCFC")   std::cout << ">>> using the Profile Likelihood test statistics modified for upper limits and Feldman-Cousins (Q_LHCFC)" << std::endl;
     if (testStat_ == "Profile") std::cout << ">>> using the Profile Likelihood test statistics not modified for upper limits (Q_Profile)" << std::endl;
     if (testStat_ == "MLZ")     std::cout << ">>> using the Maximum likelihood estimator of the signal strength as test statistics" << std::endl;
-    
-    if (readHybridResults_ || workingMode_ == MakeTestStatistics || workingMode_ == MakeSignificanceTestStatistics) {
-        // If not generating toys, don't need to fit nuisance parameters
+   
+    if ( (readHybridResults_ || workingMode_ == MakeTestStatistics || workingMode_ == MakeSignificanceTestStatistics) && noUpdateGrid_) {
+        // If not generating toys, don't need to fit nuisance parameters, unless requested to updateGrid 
         fitNuisances_ = false;
     }
     if (reportPVal_ && workingMode_ != MakeSignificance) throw std::invalid_argument("HybridNew: option --pvalue must go together with --significance");
@@ -517,14 +517,27 @@ bool HybridNew::runLimit(RooWorkspace *w, RooStats::ModelConfig *mc_s, RooStats:
 		std::cout << " HybridNew -- Found no interval in which " << rule_.c_str() << " is less than target " << cl << ", no crossings found " << std::endl;
 		if (verbose)  Logger::instance().log(std::string(Form("HybridNew.cc: %d Found no interval in which %s is less than target %g, no crossing found!",__LINE__,rule_.c_str(),cl)),Logger::kLogLevelError,__func__);
 	}
-
-	else std::cout << "HybridNew --  found  " << 100*cl << "%% confidence regions " << std::endl;  
-	for (unsigned int ib=0;ib<points.size()-1;ib+=2){
-		std::cout << "  " << points[ib].first << " (+/-" << points[ib].second << ")"<< " < " << r->GetName() << " < " << points[ib+1].first << " (+/-" << points[ib+1].second << ")" << std::endl;
-
+	else if (points.size()==2) { 
+		std::cout << "HybridNew -- One-sided boundary found for  " << 100*cl << "%% confidence regions " << std::endl;  
+		if (verbose)  Logger::instance().log(std::string(Form("HybridNew.cc: %d One-sided boundary found for %g %% confidence regions",__LINE__,100*cl)),Logger::kLogLevelInfo,__func__);
+		int ib=0;
+		if (points[0].second==0) ib=1;
+		std::cout << "  " << points[ib].first << " (+/-" << points[ib].second << ")"<< ( ib==1 ? " < " : " > ") << r->GetName() << std::endl;
+		if (verbose)  Logger::instance().log(std::string(Form("HybridNew.cc: %d  %g (+/- %g) %s %s",__LINE__,points[ib].first,points[ib].second,( ib==1 ? " < " : " > "), r->GetName())),Logger::kLogLevelInfo,__func__);
 		// Commit points to limit tree
 		limit = points[ib].first; limitErr = points[ib].second; Combine::commitPoint(false, clsTarget); 
-		limit = points[ib+1].first; limitErr = points[ib+1].second; Combine::commitPoint(false, clsTarget); 
+	}
+	else {
+		std::cout << "HybridNew -- found  " << 100*cl << "%% confidence regions " << std::endl;  
+		if (verbose)  Logger::instance().log(std::string(Form("HybridNew.cc: %d found %g %% confidence regions",__LINE__,100*cl)),Logger::kLogLevelInfo,__func__);
+		for (unsigned int ib=1;ib<points.size()-2;ib+=2){
+			std::cout << "  " << points[ib].first << " (+/-" << points[ib].second << ")"<< " < " << r->GetName() << " < " << points[ib+1].first << " (+/-" << points[ib+1].second << ")" << std::endl;
+			if (verbose)  Logger::instance().log(std::string(Form("HybridNew.cc: %d  %g (+/- %g) < %s < %g (+/- %g) ",__LINE__,points[ib].first,points[ib].second,r->GetName(),points[ib+1].first, points[ib+1].second)),Logger::kLogLevelInfo,__func__);
+
+			// Commit points to limit tree
+			limit = points[ib].first; limitErr = points[ib].second; Combine::commitPoint(false, clsTarget); 
+			limit = points[ib+1].first; limitErr = points[ib+1].second; Combine::commitPoint(false, clsTarget); 
+		}
 	}
       } else {  
 
@@ -1577,6 +1590,7 @@ void HybridNew::updateGridData(RooWorkspace *w, RooStats::ModelConfig *mc_s, Roo
         if (verbose > 1) std::cout << "Final range [" << iMin << ", " << iMax << "]" << std::endl; 
         for (int i = 0; i < iMin; ++i) {
             points[i]->second->SetBit(1);
+            updateGridPoint(w, mc_s, mc_b, data, points[i]);
             if (verbose > 1) std::cout << "  Will not use point " << i << " (r " << points[i]->first << ")" << std::endl;
         }
         for (int i = iMin; i <= iMax; ++i) {
@@ -1589,6 +1603,7 @@ void HybridNew::updateGridData(RooWorkspace *w, RooStats::ModelConfig *mc_s, Roo
         }
         for (int i = iMax+1, n = points.size(); i < n; ++i) {
             points[i]->second->SetBit(1);
+            updateGridPoint(w, mc_s, mc_b, data, points[i]);
             if (verbose > 1) std::cout << "  Will not use point " << i << " (r " << points[i]->first << ")" << std::endl;
         }
     }
@@ -1715,7 +1730,10 @@ std::vector<std::pair<double,double> > HybridNew::findIntervalsFromSplines(TGrap
 			for (int tpi=previousCross;tpi<=pti+1;tpi++){
 				reverse->SetPoint(count,limitPlot_->GetY()[tpi],limitPlot_->GetX()[tpi]);
 				reverse->SetPointError(count,limitPlot_->GetErrorY(tpi),0);
-				//std::cout << " Adding local point = " << count << ", "<<limitPlot_->GetY()[tpi] << ", " << limitPlot_->GetX()[tpi] << std::endl;
+				if (verbose) { 
+				  std::cout << " Adding local point to calculate interval boundaries, " << count << ", cl="<<limitPlot_->GetY()[tpi] << ", poi=" << limitPlot_->GetX()[tpi] << std::endl;
+    				Logger::instance().log(std::string(Form("HybridNew.cc: %d -- Adding local point to calculate interval boundaries, %d, cl=%g, poi=%g",__LINE__,count,limitPlot_->GetY()[tpi],limitPlot_->GetX()[tpi])),Logger::kLogLevelInfo,__func__);
+				}
 				count++;
 			}
 			reverse->Sort();
@@ -1730,6 +1748,7 @@ std::vector<std::pair<double,double> > HybridNew::findIntervalsFromSplines(TGrap
 	}
 	if (limitPlot_->GetY()[0] > clsTarget) 	points.push_back(std::pair<double,double>(limitPlot_->GetX()[0],0));
 	if (limitPlot_->GetY()[npoints_plot-1] > clsTarget)  points.push_back(std::pair<double,double>(limitPlot_->GetX()[npoints_plot-1],0));
+	std::sort(points.begin(),points.end());
 	// print Intervals - currently no estimate on uncertainty, how can we propagate the uncertainty to the 
 	return points;
 }
